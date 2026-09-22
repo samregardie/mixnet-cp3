@@ -1,9 +1,8 @@
-# SAMPLE hosts.txt (replace each line with your instances' public DNS)
-ubuntu@18.117.115.141
-ubuntu@3.131.135.163
-ubuntu@3.16.1.48
-ubuntu@3.139.64.38
-ubuntu@18.220.155.102
-ubuntu@18.218.40.44
-ubuntu@3.19.53.194
-ubuntu@18.118.157.193
+ubuntu@3.134.95.141
+ubuntu@18.220.161.72
+ubuntu@3.129.14.179
+ubuntu@18.118.157.176
+ubuntu@3.15.205.179
+ubuntu@3.144.229.62
+ubuntu@18.224.246.198
+ubuntu@3.134.85.108
