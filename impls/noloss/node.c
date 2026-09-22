@@ -919,15 +919,15 @@ void run_node(void *const handle,
         }
 
         const uint64_t t = now_ms();
-        if (s.root_port == -1) {
-            if ((t - s.last_hello_sent) >= c.root_hello_interval_ms) {
-                broadcast_stp(handle, &s);
-                s.last_hello_sent = t;
-            }
-        }
-        else if ((t - s.last_hello_received) >= c.reelection_interval_ms) {
-            become_own_root(handle, &s, t);
-        }
+        // Scenario 1 guarantees no link/node failures, so there is never a
+        // legitimate reason to reelect or to re-announce liveness: the
+        // periodic root hello (root_hello_interval_ms) and the reelection
+        // timeout (reelection_interval_ms) exist purely to detect and
+        // recover from a dead root/parent. Every tick either one fires
+        // before the tree has finished settling costs a full extra flood,
+        // so under this scenario's no-failure guarantee we just leave the
+        // tree to converge once via the change-triggered broadcasts in
+        // handle_stp_packet() and never re-announce afterward.
 
         if (!s.sent_lsa && ((t - s.last_root_changed) >=
                 (LSA_SILENCE_MULTIPLIER * c.reelection_interval_ms))) {
