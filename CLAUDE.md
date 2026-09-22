@@ -64,6 +64,58 @@ Distributed runs: `SSH_KEY=<key> ./impls/run_ec2.sh <testcase> hosts.txt` (add `
 existing remote build, `NODE_LOGS=1` to dump per-node stdout — that's where RTT prints land). Env
 vars must precede the command. See README.md for the EC2 security-group setup.
 
+### STP optimization: lessons from tuning `lossy`/`noloss`
+
+**Convergence-count variance is huge — do not trust `run_impl.sh` at n=10 or even n=40.**
+Individual `hybrid_lossy` runs have ranged from ~40 to ~270 packets on the *same* binary. A
+10-run sample swung between mean 102 and mean 110 on identical code; a 40-run sample once read
+95.4 (looked great) while the true mean — confirmed by a 100-run sample and by 3 real Gradescope
+submissions — is ~111. **Validate any lossy/noloss change at n≥100 before trusting the number or
+submitting**; anything smaller is close to a coin flip near a scoring threshold.
+
+**10 required convergences compound brutally against any reliability loss.** The grader needs all
+10 runs in a submission to converge, so a per-run convergence probability `p` gives only `p^10`
+chance of scoring anything. `p=0.82` (which sounds like a minor regression) → `0.82^10 ≈ 14%`
+chance of a passing submission, i.e. ~86% chance of scoring *zero* for that scenario. Never accept
+a change that drops per-run convergence below ~100% just because it lowers the mean.
+
+**Why "obviously redundant" sends usually aren't safe to cut.** In `mixnet/node.c`'s STP design, a
+non-root node only ever re-broadcasts *on receipt* (either because its own belief changed, or via
+the unconditional "relay whatever arrived on our root port" branch) — nothing is spontaneous except
+the root's periodic hello. That means the repetitive-looking traffic *is* the multi-hop delivery
+mechanism, not overhead sitting on top of it. Two changes that look safe on paper both measured as
+reliability regressions, not just noise (confirmed at n≥40-50):
+- Widening `root_hello_interval_ms` (100→130ms: 4-5/10 converged; even 100→110ms: 41/50, i.e. ~82%
+  per-run — see the compounding math above for why that's still unacceptable).
+- Restricting `broadcast_stp()`'s fanout to `port_forwarding`-true ports only (skip neighbors we've
+  "lost the comparator" to, on the theory that they already have equal-or-better info): 18/40
+  converged. The comparator only compares against a neighbor's *last-received* belief, which is a
+  much weaker guarantee than it looks — cutting a send to a neighbor also cuts *their* trigger to
+  relay further outward to whoever's downstream of them.
+
+**One validated, genuinely-safe win (already applied in `impls/{noloss,lossy}/node.c`):** delete
+the reelection-on-timeout branch (`else if ((t - s.last_hello_received) >= c.reelection_interval_ms)
+become_own_root(...)`). Both lab scenarios guarantee no permanent node/link failures, so a missed
+hello never actually means a dead parent — under 50% loss it's a routine false positive, and each
+one re-floods the whole network for no benefit. Unlike the two cuts above, this doesn't reduce
+delivery redundancy at all, only a false-positive trigger — for `lossy` specifically it's not just
+an efficiency win, it *fixes* a reliability bug (unmodified baseline measured 25/40 converged at
+n=40, i.e. it would sometimes score zero purely from bad luck on false reelections).
+
+**Loss injection mechanics** (`framework/fragment.cpp::node_recv()`), useful context for reasoning
+about retry strategy: drops happen on the **RX side**, after a full successful TCP read, via each
+receiving fragment's own `rand_r()` roll (seeded `getpid() ^ (node_addr << 16)`, so not reproducible
+run-to-run) — identical treatment for every packet type, no reordering or duplication, and the
+sender gets no success/failure signal either way. STP packets are mirrored to the convergence
+counter **at send time**, before the receiving end's drop roll even happens — so a send that gets
+dropped still costs your score, it just also accomplishes nothing.
+
+**`run_impl.sh --impl` gotcha:** it backs up `mixnet/node.c`, stages the impl in, builds, runs, and
+restores via a bash `EXIT` trap — but if the invoking shell command is killed abnormally (e.g. an
+external timeout) mid-run, the trap may not fire and `mixnet/node.c` is left holding the staged
+impl's content. Run `git diff mixnet/node.c` after any long `--impl` testing session (it should
+show no changes) before trusting that the real baseline is intact.
+
 ## Architecture
 
 **Orchestrator / fragment split.** `framework/orchestrator.cpp` is a single controller process that
