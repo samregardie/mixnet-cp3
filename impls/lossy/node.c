@@ -110,6 +110,11 @@ typedef struct {
     uint64_t last_root_changed;    // last time root_addr/path_length changed
     bool sent_lsa;                 // whether we've sent our one-shot LSA
 
+    // Counts steady-state via-root-port relay events (see
+    // relay_stp_via_root_port() below); used to throttle re-relaying onto
+    // already-closed ports without ever skipping open ones.
+    uint32_t relay_round;
+
     // Link-state topology map, one entry per known node address
     topology_entry *topology;
 
@@ -362,6 +367,38 @@ static void recompute_port_roles(node_state *const s) {
     }
 }
 
+// How many via-root-port relay events (see relay_stp_via_root_port() below)
+// to let pass between re-relaying onto a port recompute_port_roles() has
+// already marked closed. port_forwarding[i] == false is direct evidence --
+// neighbor i's own last STP advertisement already showed it knows an
+// equal-or-better path to the current root -- not a topological guess, so
+// skipping it *sometimes* only thins out an already-redundant, repeated
+// heartbeat-relay onto a link independently known not to need it. Every
+// OPEN port, and every broadcast_stp() triggered by an actual belief
+// *change*, is left at full frequency: this throttle applies nowhere else.
+static const uint32_t CLOSED_PORT_RELAY_THROTTLE = 3;
+
+// Relays a hello that just arrived via our root port onward to every other
+// neighbor -- the steady-state, high-frequency case (fires on every root
+// heartbeat that reaches us, whether or not it changed our belief). Ports
+// still open (or not yet converged with us on a common root) always get it;
+// ports the comparator has already closed are relayed to only once every
+// CLOSED_PORT_RELAY_THROTTLE such events, since we have direct evidence
+// that neighbor already has this information.
+static void relay_stp_via_root_port(void *const handle, node_state *const s) {
+    const uint32_t round = s->relay_round++;
+    for (uint16_t i = 0; i < s->num_neighbors; i++) {
+        if (((int) i == s->root_port) && (s->num_neighbors != 1)) {
+            continue;
+        }
+        if (!s->port_forwarding[i] &&
+            ((round % CLOSED_PORT_RELAY_THROTTLE) != 0)) {
+            continue;
+        }
+        send_stp(handle, s, (uint8_t) i);
+    }
+}
+
 /**
  * Adopts a fresh (root = self, path_length = 0) identity, i.e., this
  * node believes itself to be the root. Used at startup and whenever
@@ -449,9 +486,10 @@ static void handle_stp_packet(void *const handle, node_state *const s,
         // Relay a hello arriving via our root port onward to every other
         // neighbor, regardless of whether it changed our own belief. This
         // is what carries the root's periodic liveness signal past the
-        // first hop, down the rest of the tree.
+        // first hop, down the rest of the tree. (Throttled on already-closed
+        // ports -- see relay_stp_via_root_port().)
         if (via_root_port) {
-            broadcast_stp(handle, s);
+            relay_stp_via_root_port(handle, s);
         }
     }
 }
@@ -856,6 +894,7 @@ void run_node(void *const handle,
     s.neighbor_path = (uint16_t*) calloc(s.num_neighbors, sizeof(uint16_t));
     s.port_forwarding = (bool*) calloc(s.num_neighbors, sizeof(bool));
     s.sent_lsa = false;
+    s.relay_round = 0;
     s.topology = (topology_entry*) calloc(
         ((uint32_t) UINT16_MAX) + 1, sizeof(topology_entry));
     s.fib = (fib_entry*) calloc(((uint32_t) UINT16_MAX) + 1, sizeof(fib_entry));
