@@ -109,10 +109,22 @@ per-link cost and latency).
 
 ## Current state
 
-`mixnet/node.c` implements cp1 only: STP (root election, root port + tie-break on
-`(path_length, address)`, periodic hellos from the root, reelection on timeout) and FLOOD over the
-resulting spanning tree. There is no LSA/link-state database, no source routing, no ping handling,
-and no mixing — so cp2's `testcase_ping` and `testcase_sp_uniform_ring` do not pass yet.
+`mixnet/node.c` implements both cp1 and cp2: STP (root election, root port + tie-break on
+`(path_length, address)`, periodic hellos from the root, reelection on timeout), FLOOD over the
+resulting spanning tree, a one-shot LSA flood (sent once a node's STP belief has been quiet for
+`2 * reelection_interval_ms`) feeding a per-node link-state map, Dijkstra-computed shortest-path FIB
+(or a randomized loop-free walk when `do_random_routing` is set), and DATA/PING forwarding along the
+resulting source route. Sends are queued and flushed in batches of `mixing_factor` (`enqueue_send`
++ `mixing_message_received`) rather than sent immediately.
+
+**RTT (lab Step 1):** the source node prints `RTT to <dst>: <ms> ms (<us> us)` to stdout when a ping
+response completes its round trip (in `handle_ping_from_neighbor`, the `!ping->is_request` branch);
+`ping::send_time` is stamped with a microsecond clock (`now_us()`, separate from the millisecond
+`now_ms()` used for STP timers) since intra-host/EC2 RTTs are often sub-millisecond.
+`testing/lab/testcase_rtt_{line,tree,ring,full_mesh}.cpp` each ping between the two furthest nodes
+of their topology (the tree/ring/full_mesh topologies match their `testcase_stp_convergence_*`
+counterparts) — see the RTT section of README.md for how to read the printed line, including via
+`run_ec2.sh NODE_LOGS=1`.
 
 ## Environment
 

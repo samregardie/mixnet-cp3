@@ -26,6 +26,15 @@ static uint64_t now_ms(void) {
     return ((uint64_t) ts.tv_sec * 1000) + ((uint64_t) ts.tv_nsec / 1000000);
 }
 
+// Microsecond-resolution clock, used for ping::send_time/RTT rather than
+// now_ms(): intra-host and same-region EC2 RTTs commonly fall below a
+// millisecond, which now_ms() would just round to 0.
+static uint64_t now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((uint64_t) ts.tv_sec * 1000000) + ((uint64_t) ts.tv_nsec / 1000);
+}
+
 // Number of reelection intervals of STP-belief silence required before
 // a node trusts its (root, path_length) belief enough to send its LSA.
 static const uint16_t LSA_SILENCE_MULTIPLIER = 2;
@@ -292,9 +301,17 @@ static void send_stp(void *const handle, const node_state *const s,
 // Sends our current STP belief to every neighbor except our path to the
 // root (root_port), so we never echo it straight back to our parent. When
 // we are the root (root_port == -1), every port qualifies.
+//
+// Exception: a LEAF (num_neighbors == 1) has no other port to relay to, so
+// excluding its only port -- once that port becomes root_port -- would make
+// it go permanently silent after its first (pre-adoption) hello, even though
+// its belief keeps changing as convergence proceeds. Sending its belief back
+// to its own parent in that case is harmless (the parent's comparator always
+// finds its own path at least as good and ignores it), and is what keeps a
+// leaf's current state observable/relayed at all once it has a parent.
 static void broadcast_stp(void *const handle, const node_state *const s) {
     for (uint16_t i = 0; i < s->num_neighbors; i++) {
-        if ((int) i != s->root_port) {
+        if (((int) i != s->root_port) || (s->num_neighbors == 1)) {
             send_stp(handle, s, (uint8_t) i);
         }
     }
@@ -746,7 +763,7 @@ static void handle_ping_from_user(void *const handle, node_state *const s,
 
     enqueue_send(s, find_port(s, next_hop),
         make_ping_packet(rh->src_address, rh->dst_address,
-            route_length, route, true, now_ms()));
+            route_length, route, true, now_us()));
     mixing_message_received(handle, s);
 
     if (s->do_random_routing) {
@@ -782,6 +799,19 @@ static void handle_ping_from_neighbor(void *const handle, node_state *const s,
             enqueue_send(s, find_port(s, next_hop),
                 make_ping_packet(rh->dst_address, rh->src_address,
                     rh->route_length, reversed, false, ping->send_time));
+        }
+        else {
+            // A response addressed back to us: this is the round trip we
+            // started in handle_ping_from_user() completing. send_time was
+            // stamped there (and left untouched by every hop in between), so
+            // now_us() - send_time is the full request-to-response RTT.
+            // rh->src_address is the node that answered (the ping's original
+            // destination).
+            const uint64_t rtt_us = now_us() - ping->send_time;
+            printf("RTT to %u: %.3f ms (%llu us)\n",
+                (unsigned) rh->src_address, ((double) rtt_us) / 1000.0,
+                (unsigned long long) rtt_us);
+            fflush(stdout);
         }
         mixing_message_received(handle, s);
         return;
