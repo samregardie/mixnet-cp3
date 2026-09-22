@@ -921,14 +921,19 @@ void run_node(void *const handle,
         }
 
         const uint64_t t = now_ms();
-        if (s.root_port == -1) {
-            if ((t - s.last_hello_sent) >= c.root_hello_interval_ms) {
-                broadcast_stp(handle, &s);
-                s.last_hello_sent = t;
-            }
-        }
-        else if ((t - s.last_hello_received) >= c.reelection_interval_ms) {
-            become_own_root(handle, &s, t);
+        // Scenario 2 has lossy links but no permanent node/link failures, so
+        // a missed hello from our parent never means it's actually dead --
+        // just that this round got dropped. Reelecting on a timeout here
+        // would misfire under 50% loss (a burst of drops looks identical to
+        // a dead parent) and each false reelection re-floods the whole
+        // network, so we drop that branch entirely and keep only the root's
+        // periodic self-heartbeat: it's what already gives every other node
+        // repeated, relayed chances (via the unconditional forward below in
+        // handle_stp_packet) to receive the current belief despite loss.
+        if ((s.root_port == -1) &&
+            ((t - s.last_hello_sent) >= c.root_hello_interval_ms)) {
+            broadcast_stp(handle, &s);
+            s.last_hello_sent = t;
         }
 
         if (!s.sent_lsa && ((t - s.last_root_changed) >=
